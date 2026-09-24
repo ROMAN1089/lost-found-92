@@ -1,0 +1,145 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Data model:
+    // users/{uid}: displayName, email, phone, role, createdAt, updatedAt
+    // items/{id}: title, titleLower, description, category, type, location,
+    //   eventDate, status, ownerId, ownerName, searchTokens, createdAt, updatedAt
+    // comments/{id}: itemId, authorId, authorName, text, createdAt, updatedAt
+    // actions/{uid_item}: userId, itemId, itemTitle, itemOwnerId, type, status, createdAt, updatedAt
+    // saved/{uid_item}: userId, itemId, itemTitle, itemType, status, createdAt, updatedAt
+
+    function isAuthenticated() { return request.auth != null; }
+    function isOwner(uid) { return isAuthenticated() && request.auth.uid == uid; }
+    function isBootstrapAdmin() {
+      return isAuthenticated() && request.auth.token.email == 'novvika1986@gmail.com' && request.auth.token.email_verified == true;
+    }
+    function isAdmin() {
+      return isBootstrapAdmin() || (isAuthenticated() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin');
+    }
+    function recentTimestamp(value) {
+      return value is timestamp && value >= request.time - duration.value(2, 'm') && value <= request.time + duration.value(2, 'm');
+    }
+    function validRole(role) { return role in ['user', 'admin']; }
+    function validItemStatus(status) { return status in ['active', 'claimed', 'returned', 'rejected']; }
+    function validActionStatus(status) { return status in ['pending', 'approved', 'rejected', 'completed']; }
+
+    function isValidUser(data) {
+      return data.keys().hasOnly(['displayName','email','phone','role','createdAt','updatedAt']) &&
+        data.keys().hasAll(['displayName','email','phone','role','createdAt','updatedAt']) &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60 &&
+        data.email is string && data.email.size() >= 5 && data.email.size() <= 120 &&
+        data.email.matches('^[^@]+@[^@]+\\.[^@]+$') &&
+        data.phone is string && data.phone.size() <= 30 && validRole(data.role) &&
+        data.createdAt is timestamp && data.updatedAt is timestamp;
+    }
+
+    function isValidItem(data) {
+      return data.keys().hasOnly(['title','titleLower','description','category','type','location','eventDate','status','ownerId','ownerName','searchTokens','createdAt','updatedAt']) &&
+        data.keys().hasAll(['title','titleLower','description','category','type','location','eventDate','status','ownerId','ownerName','searchTokens','createdAt','updatedAt']) &&
+        data.title is string && data.title.size() >= 3 && data.title.size() <= 100 &&
+        data.titleLower is string && data.titleLower.size() >= 3 && data.titleLower.size() <= 100 &&
+        data.description is string && data.description.size() >= 10 && data.description.size() <= 1200 &&
+        data.category in ['Документы','Электроника','Ключи','Сумки','Одежда','Питомцы','Другое'] &&
+        data.type in ['lost','found'] && data.location is string && data.location.size() >= 2 && data.location.size() <= 120 &&
+        data.eventDate is timestamp && validItemStatus(data.status) &&
+        data.ownerId is string && data.ownerId.size() >= 20 && data.ownerId.size() <= 128 &&
+        data.ownerName is string && data.ownerName.size() >= 1 && data.ownerName.size() <= 60 &&
+        data.searchTokens is list && data.searchTokens.size() <= 20 &&
+        data.createdAt is timestamp && data.updatedAt is timestamp;
+    }
+
+    function isValidComment(data) {
+      return data.keys().hasOnly(['itemId','authorId','authorName','text','createdAt','updatedAt']) &&
+        data.keys().hasAll(['itemId','authorId','authorName','text','createdAt','updatedAt']) &&
+        data.itemId is string && data.itemId.size() >= 1 && data.itemId.size() <= 128 &&
+        data.authorId is string && data.authorId.size() >= 20 && data.authorId.size() <= 128 &&
+        data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 60 &&
+        data.text is string && data.text.size() >= 1 && data.text.size() <= 500 &&
+        data.createdAt is timestamp && data.updatedAt is timestamp;
+    }
+
+    function isValidAction(data) {
+      return data.keys().hasOnly(['userId','itemId','itemTitle','itemOwnerId','type','status','createdAt','updatedAt']) &&
+        data.keys().hasAll(['userId','itemId','itemTitle','itemOwnerId','type','status','createdAt','updatedAt']) &&
+        data.userId is string && data.userId.size() >= 20 && data.userId.size() <= 128 &&
+        data.itemId is string && data.itemId.size() >= 1 && data.itemId.size() <= 128 &&
+        data.itemTitle is string && data.itemTitle.size() >= 1 && data.itemTitle.size() <= 100 &&
+        data.itemOwnerId is string && data.itemOwnerId.size() >= 20 && data.itemOwnerId.size() <= 128 &&
+        data.type == 'claim' && validActionStatus(data.status) &&
+        data.createdAt is timestamp && data.updatedAt is timestamp;
+    }
+
+    function isValidSaved(data) {
+      return data.keys().hasOnly(['userId','itemId','itemTitle','itemType','status','createdAt','updatedAt']) &&
+        data.keys().hasAll(['userId','itemId','itemTitle','itemType','status','createdAt','updatedAt']) &&
+        data.userId is string && data.userId.size() >= 20 && data.userId.size() <= 128 &&
+        data.itemId is string && data.itemId.size() >= 1 && data.itemId.size() <= 128 &&
+        data.itemTitle is string && data.itemTitle.size() >= 1 && data.itemTitle.size() <= 100 &&
+        data.itemType in ['lost','found'] && data.status in ['active','archived'] &&
+        data.createdAt is timestamp && data.updatedAt is timestamp;
+    }
+
+    match /users/{userId} {
+      allow create: if isOwner(userId) && isValidUser(request.resource.data) &&
+        request.resource.data.email == request.auth.token.email &&
+        (request.resource.data.role == 'user' || (request.resource.data.role == 'admin' && isBootstrapAdmin())) &&
+        recentTimestamp(request.resource.data.createdAt) && recentTimestamp(request.resource.data.updatedAt);
+      allow read: if isOwner(userId) || isAdmin();
+      allow update: if isValidUser(request.resource.data) &&
+        ((isOwner(userId) && request.resource.data.email == resource.data.email &&
+          request.resource.data.role == resource.data.role && request.resource.data.createdAt == resource.data.createdAt) || isAdmin());
+      allow delete: if false;
+    }
+
+    match /items/{itemId} {
+      allow read: if isAuthenticated();
+      allow create: if isValidItem(request.resource.data) &&
+        (request.resource.data.ownerId == request.auth.uid || isAdmin()) &&
+        recentTimestamp(request.resource.data.createdAt) && recentTimestamp(request.resource.data.updatedAt);
+      allow update: if isValidItem(request.resource.data) &&
+        request.resource.data.ownerId == resource.data.ownerId && request.resource.data.createdAt == resource.data.createdAt &&
+        (isAdmin() || (isOwner(resource.data.ownerId) &&
+          (request.resource.data.status == resource.data.status || request.resource.data.status == 'returned')));
+      allow delete: if isAdmin() || isOwner(resource.data.ownerId);
+    }
+
+    match /comments/{commentId} {
+      allow read: if isAuthenticated();
+      allow create: if isValidComment(request.resource.data) &&
+        request.resource.data.authorId == request.auth.uid &&
+        exists(/databases/$(database)/documents/items/$(request.resource.data.itemId)) &&
+        recentTimestamp(request.resource.data.createdAt) && recentTimestamp(request.resource.data.updatedAt);
+      allow update: if isValidComment(request.resource.data) && isOwner(resource.data.authorId) &&
+        request.resource.data.authorId == resource.data.authorId && request.resource.data.itemId == resource.data.itemId &&
+        request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if isAdmin() || isOwner(resource.data.authorId);
+    }
+
+    match /actions/{actionId} {
+      allow create: if isValidAction(request.resource.data) &&
+        request.resource.data.userId == request.auth.uid && request.resource.data.status == 'pending' &&
+        exists(/databases/$(database)/documents/items/$(request.resource.data.itemId)) &&
+        recentTimestamp(request.resource.data.createdAt) && recentTimestamp(request.resource.data.updatedAt);
+      allow read: if isAdmin() || isOwner(resource.data.userId) || isOwner(resource.data.itemOwnerId);
+      allow update: if isAdmin() && isValidAction(request.resource.data) &&
+        request.resource.data.userId == resource.data.userId && request.resource.data.itemId == resource.data.itemId &&
+        request.resource.data.itemOwnerId == resource.data.itemOwnerId && request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if isAdmin() || (isOwner(resource.data.userId) && resource.data.status == 'pending');
+    }
+
+    match /saved/{savedId} {
+      allow create: if isValidSaved(request.resource.data) && isOwner(request.resource.data.userId) &&
+        exists(/databases/$(database)/documents/items/$(request.resource.data.itemId)) &&
+        recentTimestamp(request.resource.data.createdAt) && recentTimestamp(request.resource.data.updatedAt);
+      allow read, delete: if isOwner(resource.data.userId);
+      allow update: if isOwner(resource.data.userId) && isValidSaved(request.resource.data) &&
+        request.resource.data.userId == resource.data.userId && request.resource.data.itemId == resource.data.itemId &&
+        request.resource.data.createdAt == resource.data.createdAt;
+    }
+
+    match /{document=**} { allow read, write: if false; }
+  }
+}
